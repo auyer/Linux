@@ -2,7 +2,7 @@ What:		/sys/class/reboot-mode/<driver>/reboot_modes
 Date:		March 2026(TBD)
 KernelVersion:	TBD
 Contact:	linux-pm@vger.kernel.org
-		Description:
+Description:
 		This interface exposes the reboot-mode arguments
 		registered with the reboot-mode framework. It is
 		a read-only interface and provides a space
