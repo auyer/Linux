@@ -30,6 +30,7 @@
  * input devices.
  */
 
+#include <linux/cleanup.h>
 #include <linux/device.h>
 #include <linux/hid.h>
 #include <linux/input.h>
@@ -341,7 +342,6 @@ static int wiimod_led_probe(const struct wiimod_ops *ops,
 	struct device *dev = &wdata->hdev->dev;
 	size_t namesz = strlen(dev_name(dev)) + 9;
 	struct led_classdev *led;
-	unsigned long flags;
 	char *name;
 	int ret;
 
@@ -364,9 +364,8 @@ static int wiimod_led_probe(const struct wiimod_ops *ops,
 
 	/* enable LED1 to stop initial LED-blinking */
 	if (ops->arg == 0) {
-		spin_lock_irqsave(&wdata->state.lock, flags);
-		wiiproto_req_leds(wdata, WIIPROTO_FLAG_LED1);
-		spin_unlock_irqrestore(&wdata->state.lock, flags);
+		scoped_guard(spinlock_irqsave, &wdata->state.lock)
+			wiiproto_req_leds(wdata, WIIPROTO_FLAG_LED1);
 	}
 
 	return 0;
