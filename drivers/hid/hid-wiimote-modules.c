@@ -341,11 +341,11 @@ static int wiimod_led_probe(const struct wiimod_ops *ops,
 {
 	struct device *dev = &wdata->hdev->dev;
 	size_t namesz = strlen(dev_name(dev)) + 9;
-	struct led_classdev *led;
 	char *name;
 	int ret;
 
-	led = kzalloc(sizeof(struct led_classdev) + namesz, GFP_KERNEL);
+	struct led_classdev *led __free(kfree) =
+		kzalloc(sizeof(struct led_classdev) + namesz, GFP_KERNEL);
 	if (!led)
 		return -ENOMEM;
 
@@ -359,8 +359,12 @@ static int wiimod_led_probe(const struct wiimod_ops *ops,
 
 	wdata->leds[ops->arg] = led;
 	ret = led_classdev_register(dev, led);
-	if (ret)
-		goto err_free;
+	if (ret) {
+		wdata->leds[ops->arg] = NULL;
+		return ret;
+	}
+
+	retain_and_null_ptr(led);
 
 	/* enable LED1 to stop initial LED-blinking */
 	if (ops->arg == 0) {
@@ -369,11 +373,6 @@ static int wiimod_led_probe(const struct wiimod_ops *ops,
 	}
 
 	return 0;
-
-err_free:
-	wdata->leds[ops->arg] = NULL;
-	kfree(led);
-	return ret;
 }
 
 static void wiimod_led_remove(const struct wiimod_ops *ops,
