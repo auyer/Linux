@@ -154,6 +154,7 @@ struct wiimote_data {
 	struct timer_list timer;
 	struct wiimote_debug *debug;
 	u8 player_id;
+	u8 init_state;
 
 	union {
 		struct input_dev *input;
@@ -375,5 +376,13 @@ static inline int wiimote_cmd_wait_noint(struct wiimote_data *wdata)
 	else
 		return 0;
 }
+
+/* controller initialization tracker bits */
+#define WIIMOTE_PROBE_HW_STARTED  BIT(0)  // hid_hw_start succeeded
+#define WIIMOTE_PROBE_HW_OPENED   BIT(1)  // hid_hw_open succeeded
+#define WIIMOTE_PROBE_READY       BIT(2)  // wiimote_schedule succeeded
+#define WIIMOTE_MP_LOADED         BIT(3)  // wiimote_mp_load succeeded
+#define WIIMOTE_EXT_LOADED        BIT(4)  // wiimote_ext_load succeeded
+#define WIIMOTE_MODULES_LOADED    BIT(5)  // wiimote_modules_load succeeded
 
 #endif

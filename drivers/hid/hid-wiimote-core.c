@@ -679,6 +679,8 @@ static void wiimote_modules_load(struct wiimote_data *wdata,
 		wiiproto_req_leds(wdata, player_leds[(wdata->player_id - 1) % 4]);
 	}
 
+
+	wdata->init_state |= WIIMOTE_MODULES_LOADED;
 	return;
 
 error:
@@ -742,6 +744,8 @@ static void wiimote_ext_load(struct wiimote_data *wdata, unsigned int ext)
 
 	scoped_guard(spinlock_irqsave, &wdata->state.lock)
 		wdata->state.exttype = ext;
+
+	wdata->init_state |= WIIMOTE_EXT_LOADED;
 }
 
 static void wiimote_ext_unload(struct wiimote_data *wdata)
@@ -774,6 +778,8 @@ static void wiimote_mp_load(struct wiimote_data *wdata)
 
 	scoped_guard(spinlock_irqsave, &wdata->state.lock)
 		wdata->state.mp = mode;
+
+	wdata->init_state |= WIIMOTE_MP_LOADED;
 }
 
 static void wiimote_mp_unload(struct wiimote_data *wdata)
@@ -1751,39 +1757,56 @@ static DEFINE_IDA(wiimote_ida);
 
 static void wiimote_destroy(struct wiimote_data *wdata)
 {
+	if (!wdata)
+		return;
+
+	// safe, debugfs checks IS_ERR_OR_NULL
 	wiidebug_deinit(wdata);
 
-	ida_free(&wiimote_ida, wdata->player_id);
+	if (wdata->player_id)
+		ida_free(&wiimote_ida, wdata->player_id);
 
 	/* prevent init_worker from being scheduled again */
 	scoped_guard(spinlock_irqsave, &wdata->state.lock)
 		wdata->state.flags |= WIIPROTO_FLAG_EXITING;
 
-	cancel_work_sync(&wdata->init_worker);
-	timer_shutdown_sync(&wdata->timer);
+	if (wdata->init_state & WIIMOTE_PROBE_READY) {
+		cancel_work_sync(&wdata->init_worker);
+		timer_shutdown_sync(&wdata->timer);
+	}
 
+	// safe, checks dev for NULL
 	device_remove_file(&wdata->hdev->dev, &dev_attr_devtype);
 	device_remove_file(&wdata->hdev->dev, &dev_attr_extension);
 
-	wiimote_mp_unload(wdata);
-	wiimote_ext_unload(wdata);
-	wiimote_modules_unload(wdata);
+	if (wdata->init_state & WIIMOTE_MP_LOADED)
+		wiimote_mp_unload(wdata);
+	if (wdata->init_state & WIIMOTE_EXT_LOADED)
+		wiimote_ext_unload(wdata);
+	if (wdata->init_state & WIIMOTE_MODULES_LOADED)
+		wiimote_modules_unload(wdata);
+
 	cancel_work_sync(&wdata->queue.worker);
-	hid_hw_close(wdata->hdev);
-	hid_hw_stop(wdata->hdev);
+
+	if (wdata->init_state & WIIMOTE_PROBE_HW_OPENED)
+		hid_hw_close(wdata->hdev);
+	if (wdata->init_state & WIIMOTE_PROBE_HW_STARTED)
+		hid_hw_stop(wdata->hdev);
 
 	kfree(wdata);
 }
 
+DEFINE_FREE(wiimote_probe_cleanup, struct wiimote_data *,
+	wiimote_destroy(_T))
+
 static int wiimote_hid_probe(struct hid_device *hdev,
 				const struct hid_device_id *id)
 {
-	struct wiimote_data *wdata;
 	int ret;
 
 	hdev->quirks |= HID_QUIRK_NO_INIT_REPORTS;
 
-	wdata = wiimote_create(hdev);
+	struct wiimote_data *wdata __free(wiimote_probe_cleanup) = wiimote_create(hdev);
 	if (!wdata) {
 		hid_err(hdev, "Can't alloc device\n");
 		return -ENOMEM;
@@ -1792,41 +1815,43 @@ static int wiimote_hid_probe(struct hid_device *hdev,
 	ret = hid_parse(hdev);
 	if (ret) {
 		hid_err(hdev, "HID parse failed\n");
-		goto err;
+		return ret;
 	}
 
 	ret = hid_hw_start(hdev, HID_CONNECT_HIDRAW);
 	if (ret) {
 		hid_err(hdev, "HW start failed\n");
-		goto err;
+		return ret;
 	}
+	wdata->init_state |= WIIMOTE_PROBE_HW_STARTED;
 
 	ret = hid_hw_open(hdev);
 	if (ret) {
 		hid_err(hdev, "cannot start hardware I/O\n");
-		goto err_stop;
+		return ret;
 	}
+	wdata->init_state |= WIIMOTE_PROBE_HW_OPENED;
 
 	ret = device_create_file(&hdev->dev, &dev_attr_extension);
 	if (ret) {
 		hid_err(hdev, "cannot create sysfs attribute\n");
-		goto err_close;
+		return ret;
 	}
 
 	ret = device_create_file(&hdev->dev, &dev_attr_devtype);
 	if (ret) {
 		hid_err(hdev, "cannot create sysfs attribute\n");
-		goto err_ext;
+		return ret;
 	}
 
 	ret = wiidebug_init(wdata);
 	if (ret)
-		goto err_free;
+		return ret;
 
 	ret = ida_alloc_min(&wiimote_ida, 1, GFP_KERNEL);
 	if (ret < 1) {
 		hid_err(hdev, "cannot allocate controller id\n");
-		goto err_free;
+		return ret;
 	}
 
 	wdata->player_id = ret;
@@ -1834,24 +1859,10 @@ static int wiimote_hid_probe(struct hid_device *hdev,
 
 	/* schedule device detection */
 	wiimote_schedule(wdata);
+	wdata->init_state |= WIIMOTE_PROBE_READY;
 
+	retain_and_null_ptr(wdata);
 	return 0;
-
-err_free:
-	wiimote_destroy(wdata);
-	return ret;
-
-err_ext:
-	device_remove_file(&wdata->hdev->dev, &dev_attr_extension);
-err_close:
-	hid_hw_close(hdev);
-err_stop:
-	hid_hw_stop(hdev);
-err:
-	input_free_device(wdata->ir);
-	input_free_device(wdata->accel);
-	kfree(wdata);
-	return ret;
 }
 
 static void wiimote_hid_remove(struct hid_device *hdev)
@@ -1902,3 +1913,4 @@ module_exit(wiimote_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("David Herrmann <dh.herrmann@gmail.com>");
 MODULE_DESCRIPTION("Driver for Nintendo Wii / Wii U peripherals");
+
